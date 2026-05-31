@@ -1,0 +1,134 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rtk-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_KEEP_ALIVE: 1h
+      OLLAMA_HOST: ${OLLAMA_HOST}
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    networks:
+      - rtk-network
+    restart: unless-stopped
+    command: serve
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: rtk-ollama-pull
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - rtk-network
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME}
+      OLLAMA_HOST: ${OLLAMA_HOST}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sleep 20
+        if ollama list | grep "$${LLM_MODEL_NAME}" > /dev/null; then
+          echo "Model $${LLM_MODEL_NAME} was pulled"
+        else
+          echo "Pulling model: $${LLM_MODEL_NAME}"
+          if ollama pull "$${LLM_MODEL_NAME}"; then
+            echo "Model $${LLM_MODEL_NAME} pulled successfully!"
+          else
+            echo "Failed to pull model $${LLM_MODEL_NAME}"
+            exit 1
+          fi
+        fi
+
+
+  rag_mock:
+    build: .
+    container_name: rtk-rag-mock
+    command:
+      [
+        "uvicorn",
+        "services.rag_mock.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8090",
+      ]
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8090/health').read()",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - rtk-network
+    restart: unless-stopped
+
+  agent:
+    build: .
+    container_name: rtk-agent
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MCP_SERVER_MODULE: ${MCP_SERVER_MODULE}
+      RAG_BASE_URL: ${RAG_BASE_URL}
+      LLM_MODE: ${LLM_MODE}
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME}
+      OLLAMA_HOST: ${OLLAMA_HOST}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS}
+      REQUEST_TIME_BUDGET_SECONDS: ${REQUEST_TIME_BUDGET_SECONDS}
+      ALLOW_QUEUE_CHANGE: ${ALLOW_QUEUE_CHANGE}
+      DEBUG: ${DEBUG}
+      MCP_DEBUG: ${MCP_DEBUG}
+    ports:
+      - "8080:8080"
+#    extra_hosts:
+#      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+      rag_mock:
+        condition: service_healthy
+    networks:
+      - rtk-network
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+    name: rtk-ollama-data
+
+networks:
+  rtk-network:
+    name: rtk-network
+    driver: bridge
